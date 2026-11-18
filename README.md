@@ -1,6 +1,13 @@
-# jev-trader
+# mashed-kairos
 
-One decision every Monad block. A TypeSafe Jev model watches the Kuru cbBTC-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
+One decision every Monad block. A model watches the Kuru cbBTC-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
+
+Fork of [jev-traderbot](https://github.com/mashmalol/jev-traderbot). Two additions on top of it:
+
+- **Minara ("Kairos") model adapter** — `MODEL=minara` posts one synchronous `POST /v1/developer/chat` per block in `mode: "fast"`, with a 250 ms `AbortController` deadline, strict JSON schema parsing, a 3-block bounded last-known-good cache, and a `minaraFailures` counter that rides every block event. A late or failed answer is a hold: no order that block.
+- **Read-only dashboard** (`ui/`) — Vite + React 18 + Tailwind, ReactBits Hyperspeed backdrop under a MagicBento grid: decision, latency, quote, position, fills, model health, P&L. It consumes `GET /events` and never writes to the bot.
+
+For the live mainnet configuration, read [`.env.md`](./.env.md) — every variable, the gas cost trap, and a step-by-step first-live checklist.
 
 ## Run
 
@@ -8,11 +15,17 @@ One decision every Monad block. A TypeSafe Jev model watches the Kuru cbBTC-USDC
     bun install
     bun run start
 
-With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. Set `MODEL=jev` and `TYPESAFE_AI_API_KEY` to use Jev; the default `mock` is a momentum heuristic stand-in.
+With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. `MODEL` picks the decision source: `mock` (default, a momentum heuristic stand-in), `jev` (TypeSafe AI, needs `TYPESAFE_AI_API_KEY`), or `minara` (Minara Agent API, needs `MINARA_API_KEY`).
+
+The dashboard lives in `ui/` and is a separate app with its own `package.json`:
+
+    cd ui && npm install && npm run dev     # http://localhost:5173
+
+It proxies `/events` to the bot, so run the bot too. See [`ui/README.md`](./ui/README.md).
 
 ## Endpoints
 
-Deployed (dry run, mock model): https://jev-trader-production.up.railway.app
+Deployed upstream (dry run, mock model): https://jev-trader-production.up.railway.app
 
 - `GET /` snapshot: model, wallet, dryRun, pair, latest block event
 - `GET /history` last 1000 block events
@@ -29,7 +42,8 @@ Every event (see `src/trader.ts` for types):
       "fill": null,
       "resting": { "bidMon": 200, "askMon": 200 },
       "position": { "side": "short", "size": 200, "entryPrice": 0.022633, "unrealizedUsd": -0.0006, "unrealizedMon": -0.027 },
-      "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 }
+      "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 },
+      "minaraFailures": 0
     }
 
 Every block the model is asked about the move over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is the order that block put on the book: a post-only limit order of `TRADE_SIZE_BASE` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). `hold` appears only with `decision.late: true`, when the model missed the block and nothing was posted. When the position cap (or, live, margin funds) blocks a side, the quote goes on the other side with `capped: true` and `probabilities` still show the model's call. `resting` is our size known to be on the book after this block. `upIn10` equals the buy probability.
@@ -52,10 +66,12 @@ Live sends are fired and forgotten, so the `block` event carries the **intent**:
     src/chain.ts    block feed (WebSocket newHeads + polling backstop, newest block only), raw RPC
     src/book.ts     one-eth_call order book reader (decodes getL2Book, merges the AMM vault)
     src/market.ts   Kuru: read book, hand-encoded batchUpdate (cancel + post-only place), margin deposits, local nonce, async confirmation
-    src/model.ts    Model interface, JevModel (AI SDK experimental_evaluate), MockModel
+    src/model.ts    Model interface, JevModel (AI SDK experimental_evaluate), MinaraModel (Kairos Agent API), MockModel
     src/trades.ts   Trade log feed (eth_getLogs): taker prints, our maker fills, CVD summary
     src/trader.ts   the loop: one in flight, hold when late, position and P&L accounting
     src/server.ts   Bun.serve: snapshot, history, SSE
+    ui/             read-only React dashboard (separate Vite app)
+    scripts/        minara-test.ts / minara-loop-test.ts — model and loop acceptance suites against a local mock API
 
 ## The 300 ms budget
 
@@ -70,4 +86,5 @@ dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it 
 
     bun run scripts/bench-read.ts     # book reader vs the SDK: exactness and latency
     bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
-# jev-traderbot
+    bun run scripts/minara-test.ts    # MinaraModel acceptance: parse, timeout, HTTP error, cache rules
+    bun run scripts/minara-loop-test.ts  # Trader + MinaraModel: hold posts no order, late is counted
