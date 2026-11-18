@@ -24,6 +24,15 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(true);
   const [focus, setFocus] = useState(false);
+  const [pairOverride, setPairOverride] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : localStorage.getItem("kairos.pair"),
+  );
+  // The bot's actual market is fixed by its MARKET env; the header select is the user's
+  // display choice. The live pair is always in the list, the stored override wins.
+  const pairOptions = Array.from(
+    new Set(["cbBTC/USDC", "MON/USDC", "WMON/USDC", "ETH/USDC", meta?.pair ?? ""].filter(Boolean)),
+  );
+  const pair = pairOverride ?? meta?.pair ?? "…";
 
   useEffect(() => {
     return connectSSE(
@@ -79,9 +88,29 @@ export default function App() {
       {/* Layer 20: content */}
       <main className={`relative z-20 min-h-screen p-6 transition-opacity ${focus ? "opacity-40" : ""}`}>
         <header className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-semibold tracking-tight text-white/90">
-            jev-traderbot · {meta?.pair ?? "…"}
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight text-white/90">
+              mashed kairos
+            </h1>
+            {/* The pair is display metadata: the bot's market is fixed by its MARKET env var.
+                The override is kept in localStorage so a reload keeps the user's choice. */}
+            <select
+              value={pair}
+              onChange={(e) => {
+                const v = e.target.value;
+                setPairOverride(v === meta?.pair ? null : v);
+                localStorage.setItem("kairos.pair", v);
+              }}
+              className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/70 outline-none"
+              aria-label="Asset pair"
+            >
+              {pairOptions.map((p) => (
+                <option key={p} value={p} className="bg-[#0a0a0a]">
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex items-center gap-3 text-sm text-white/60">
             {meta && (
               <span className="rounded-full border border-white/10 px-2.5 py-1">
@@ -130,7 +159,7 @@ export default function App() {
           </div>
         ) : (
           <div className="flex h-[50vh] items-center justify-center text-white/50">
-            Connecting to jev-traderbot…
+            Connecting to mashed kairos…
           </div>
         )}
       </main>

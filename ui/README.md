@@ -4,6 +4,10 @@ React dashboard (Vite + React 18 + Tailwind), per `SEED-CONTEXT.md`. **Read-only
 consumes the bot's `GET /events` SSE stream and never imports from `src/` or calls
 the Minara API.
 
+Branding: the header is **mashed kairos**. The asset pair next to it is a user
+display choice (persisted in `localStorage`, key `kairos.pair`); the bot's actual
+market is fixed by its `MARKET` env var.
+
 ## Run
 
 ```bash
