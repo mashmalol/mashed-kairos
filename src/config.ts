@@ -28,9 +28,19 @@ export const config = {
   pendingBlocks: 10, // give up on a tx with no receipt after this many blocks
   refreshBlocks: 200, // how often to refresh the fee estimate, margin balances and the vault check
   horizonBlocks: Number(env("HORIZON_BLOCKS", "100")), // the model is asked about the move over this many blocks (~30 s)
-  model: env("MODEL", "mock") as "mock" | "jev",
+  model: env("MODEL", "mock") as "mock" | "jev" | "minara",
   jevModelId: env("JEV_MODEL_ID", "jev-latest")!,
   jevUsdPerMTok: 0.042,
+  // Minara Agent API ("Kairos"): POST {minaraBaseUrl}/v1/developer/chat, mode "fast".
+  // The base URL is overridable so the model-level acceptance tests can run against
+  // a local mock endpoint without touching the internet.
+  minaraApiKey: env("MINARA_API_KEY"),
+  minaraBaseUrl: env("MINARA_BASE_URL", "https://api.minara.ai")!, // docs also show api-developer.minara.ai
+  minaraMode: env("MINARA_MODE", "fast") as "fast" | "expert", // never "expert" in the loop
+  /** Hard timeout for one Minara call. 250, not 300: leaves ~50 ms of headroom for parsing and loop overhead. */
+  minaraBlockDeadlineMs: Number(env("MINARA_BLOCK_DEADLINE_MS", "250")),
+  /** Reuse the last-known-good decision on a failed call only if it is at most this many blocks old AND the spread has not more than doubled. */
+  minaraCacheMaxBlocks: Number(env("MINARA_CACHE_MAX_BLOCKS", "3")),
   port: Number(env("PORT", "3000")),
   historySize: 1000,
 };

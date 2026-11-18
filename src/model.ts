@@ -32,6 +32,8 @@ export interface Decision {
   upIn10: number;
   latencyMs: number;
   inputTokens: number;
+  /** Set by models that answer after their own deadline (Minara): the block was answered late. */
+  late?: boolean;
 }
 
 export interface Model {
@@ -76,6 +78,167 @@ export class JevModel implements Model {
   }
 }
 
+/**
+ * Minara Agent API ("Kairos"): one synchronous `POST /v1/developer/chat` per block in
+ * `mode: "fast"` (SEED-CONTEXT.md §3-§5). The Minara API is a conversational endpoint and
+ * is not guaranteed to answer within the ~300 ms block, so the model enforces its own
+ * deadline and never leaves the loop holding the bag:
+ *
+ * - Strategy A: AbortController at `minaraBlockDeadlineMs`; a timed-out call is dead —
+ *   no retry inside the block.
+ * - Strategy B: on failure, the last successful decision is reused only if it is at most
+ *   `minaraCacheMaxBlocks` old AND the spread has not more than doubled; otherwise hold.
+ * - Every failure (timeout, HTTP != 2xx, non-JSON or schema-violating content) increments
+ *   `minaraFailures`, which the block event carries for the dashboard and the visual driver.
+ * - A failed answer is a hold: `late: true`, `probabilities.hold = 1`, no quote posted.
+ *
+ * Red lines respected: no retries within a block, one call per block, no free-form
+ * parsing, no CLI subprocess, `mode` is never "expert" in the loop.
+ */
+export class MinaraModel implements Model {
+  readonly name = "minara";
+  /** Monotonic failure counter; the trader copies it into every block event. */
+  minaraFailures = 0;
+  private cache: { decision: Decision; block: number; spreadBps: number } | null = null;
+  private startedAt = Date.now();
+  private calls = 0;
+
+  constructor(
+    private apiKey: string,
+    private baseUrl: string = config.minaraBaseUrl,
+    private mode: "fast" | "expert" = config.minaraMode,
+    private blockDeadlineMs: number = config.minaraBlockDeadlineMs,
+    private cacheMaxBlocks: number = config.minaraCacheMaxBlocks,
+  ) {}
+
+  async decide(state: TradeState): Promise<Decision> {
+    const started = performance.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.blockDeadlineMs);
+    try {
+      const content = await this.call(state, controller.signal);
+      const parsed = this.parseDecision(content);
+      this.cache = { decision: parsed, block: state.block, spreadBps: state.spreadBps };
+      return { ...parsed, latencyMs: performance.now() - started };
+    } catch {
+      this.minaraFailures++;
+      const cached = this.validCache(state);
+      if (cached) return { ...cached, latencyMs: performance.now() - started, late: true };
+      return {
+        action: "hold",
+        probabilities: { buy: 0, sell: 0, hold: 1 },
+        upIn10: 0,
+        latencyMs: performance.now() - started,
+        inputTokens: 0,
+        late: true,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Strategy A: one synchronous call, aborted at the deadline. Returns the raw content string or throws. */
+  private async call(state: TradeState, signal: AbortSignal): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/v1/developer/chat`, {
+      signal,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: this.mode,
+        stream: false,
+        background: false,
+        // Idempotency key, unique per process+block so a restart never 409s against history.
+        requestId: `jev-${this.startedAt}-${this.calls++}`,
+        message: { role: "user", content: this.prompt(state) },
+      }),
+    });
+    if (!res.ok) throw new Error(`Minara HTTP ${res.status}`);
+    const data = (await res.json()) as { content?: unknown };
+    if (typeof data.content !== "string") throw new Error("Minara: no content");
+    return data.content;
+  }
+
+  /** Strict structured prompt (seed §5.3): the response must be exactly one JSON object. */
+  private prompt(state: TradeState): string {
+    return [
+      "You are a market-making decision model for the Kuru cbBTC-USDC order book on Monad.",
+      "Given the following block snapshot, return ONLY a JSON object with this exact shape:",
+      '{"action":"buy"|"sell"|"hold","probabilities":{"buy":number,"sell":number,"hold":number},"upIn10":number}',
+      "",
+      "Rules:",
+      '- "action" must be exactly one of "buy", "sell", or "hold".',
+      '- "probabilities" values must sum to 1.0.',
+      '- "upIn10" is the probability that the price will be higher in 10 blocks.',
+      "",
+      `The question is about the move over ${state.horizonBlocks} blocks (~${Math.round(state.horizonBlocks * state.blockMs / 1000)} s).`,
+      "",
+      "Block Snapshot:",
+      JSON.stringify(state),
+    ].join("\n");
+  }
+
+  /** Strict JSON schema check; anything that does not match is a failed call. */
+  private parseDecision(content: string): Decision {
+    let obj: unknown;
+    try {
+      obj = JSON.parse(content);
+    } catch {
+      throw new Error("Minara: content is not JSON");
+    }
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("Minara: not an object");
+    const o = obj as Record<string, unknown>;
+    const action = o.action;
+    if (action !== "buy" && action !== "sell" && action !== "hold") throw new Error("Minara: bad action");
+    const p = o.probabilities;
+    if (typeof p !== "object" || p === null) throw new Error("Minara: no probabilities");
+    const probs = p as Record<string, unknown>;
+    const buy = Number(probs.buy), sell = Number(probs.sell), hold = Number(probs.hold);
+    for (const v of [buy, sell, hold]) if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) throw new Error("Minara: bad probability");
+    if (Math.abs(buy + sell + hold - 1) > 0.01) throw new Error("Minara: probabilities do not sum to 1");
+    const upIn10 = typeof o.upIn10 === "number" && Number.isFinite(o.upIn10) ? o.upIn10 : buy; // conservative default
+    return {
+      action,
+      probabilities: { buy, sell, hold },
+      upIn10,
+      latencyMs: 0, // set by decide()
+      inputTokens: Math.round(content.length / 4),
+    };
+  }
+
+  /** Strategy B: fresh cache (age <= max, spread not > 2x since it was written). */
+  private validCache(state: TradeState): Decision | null {
+    const c = this.cache;
+    if (!c) return null;
+    if (state.block - c.block > this.cacheMaxBlocks) return null;
+    if (state.spreadBps > c.spreadBps * 2) return null;
+    return c.decision;
+  }
+}
+
+/**
+ * Jev needs TYPESAFE_AI_API_KEY. Without one every call fails, so every block is a late hold and
+ * the dashboard shows nothing happening. Run the mock instead: the snapshot names it, so the
+ * dashboard labels it as a stand-in rather than passing it off as Jev.
+ */
+export const createModel = (): Model => {
+  if (config.model === "minara") {
+    if (!config.minaraApiKey?.trim()) {
+      console.warn("MODEL=minara but MINARA_API_KEY is not set: running the mock model instead");
+      return new MockModel();
+    }
+    return new MinaraModel(config.minaraApiKey);
+  }
+  if (config.model !== "jev") return new MockModel();
+  if (!process.env.TYPESAFE_AI_API_KEY?.trim()) {
+    console.warn("MODEL=jev but TYPESAFE_AI_API_KEY is not set: running the mock model instead");
+    return new MockModel();
+  }
+  return new JevModel();
+};
+
 /** Deterministic stand-in: momentum + imbalance + mean reversion toward flat. */
 export class MockModel implements Model {
   readonly name = "mock";
@@ -103,17 +266,3 @@ export class MockModel implements Model {
     return ((h % 1000) / 1000 - 0.5) * 3;
   }
 }
-
-/**
- * Jev needs TYPESAFE_AI_API_KEY. Without one every call fails, so every block is a late hold and
- * the dashboard shows nothing happening. Run the mock instead: the snapshot names it, so the
- * dashboard labels it as a stand-in rather than passing it off as Jev.
- */
-export const createModel = (): Model => {
-  if (config.model !== "jev") return new MockModel();
-  if (!process.env.TYPESAFE_AI_API_KEY?.trim()) {
-    console.warn("MODEL=jev but TYPESAFE_AI_API_KEY is not set: running the mock model instead");
-    return new MockModel();
-  }
-  return new JevModel();
-};

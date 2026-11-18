@@ -20,6 +20,8 @@ export interface BlockEvent {
   resting: { bidMon: number; askMon: number };
   position: { side: "long" | "short" | "flat"; size: number; entryPrice: number | null; unrealizedUsd: number; unrealizedMon: number };
   totals: Totals;
+  /** Minara adapter failure counter (0 for the other models), for the dashboard's model-health card. */
+  minaraFailures?: number;
 }
 
 /** Per-block latency: the book read, and read + decide + send end to end. */
@@ -127,10 +129,13 @@ export class Trader {
       this.trades?.poll(block).then(() => this.harvest()); // off the hot path: eth_getLogs for prints (and our fills) since the last poll
 
       const decision = await this.model.decide(this.buildState(block, book));
-      const wanted: Side = decision.action === "sell" ? "sell" : "buy";
+      // `hold` means the model refused to answer (Minara failure/cache miss): no order this block.
+      const wanted: Side | null = decision.action === "sell" ? "sell" : decision.action === "buy" ? "buy" : null;
       const other: Side = wanted === "buy" ? "sell" : "buy";
       // The position cap (and, live, margin funds) can only pick the reducing side. The probabilities still show the model's call.
-      const side: Side | null = this.allowed(wanted, book) ? wanted : this.allowed(other, book) ? other : null;
+      const side: Side | null = wanted
+        ? this.allowed(wanted, book) ? wanted : this.allowed(other, book) ? other : null
+        : null;
       this.totals.decisions++;
       this.totals.jevUsd += (decision.inputTokens / 1e6) * config.jevUsdPerMTok;
 
@@ -291,6 +296,9 @@ export class Trader {
 
   private emit(block: number, book: Book, decision: Decision | null, quote: Quote | null, late: boolean, timing?: Timing) {
     const t = this.totals;
+    // A model that answered after its own deadline (Minara hold) is a late block too; the busy
+    // path above already counted its own, so only count the model-reported kind here.
+    if (!late && decision?.late) t.lateBlocks++;
     t.gasUsd = t.gasMon * book.mid;
     const unrealized = this.unrealizedUsd(book.mid);
     t.pnlUsd = t.realizedUsd + unrealized - t.gasUsd;
@@ -301,7 +309,7 @@ export class Trader {
       block, ts: Date.now(), mid: book.mid, bestBid: book.bid, bestAsk: book.ask, spreadBps: round(book.spreadBps, 2),
       decision: late
         ? { action: "hold", probabilities: { buy: 0, sell: 0, hold: 1 }, upIn10: 0.5, latencyMs: 0, late: true }
-        : decision && { action: decision.action, probabilities: decision.probabilities, upIn10: decision.upIn10, latencyMs: Math.round(decision.latencyMs), late: false },
+        : decision && { action: decision.action, probabilities: decision.probabilities, upIn10: decision.upIn10, latencyMs: Math.round(decision.latencyMs), late: decision.late ?? false },
       quote,
       fill: null,
       resting: { bidMon: round(this.restingMon("buy"), 1), askMon: round(this.restingMon("sell"), 1) },
@@ -310,6 +318,7 @@ export class Trader {
         size, entryPrice: this.entryPrice(), unrealizedUsd: round(unrealized, 4), unrealizedMon: round(unrealized / book.mid, 4),
       },
       totals: { ...t, jevUsd: round(t.jevUsd, 6), gasMon: round(t.gasMon, 6), gasUsd: round(t.gasUsd, 6), realizedUsd: round(t.realizedUsd, 4), pnlUsd: round(t.pnlUsd, 4), pnlMon: round(t.pnlMon, 4), pnlPct: round(t.pnlPct, 3) },
+      minaraFailures: (this.model as { minaraFailures?: number }).minaraFailures ?? 0,
     };
     this.history.push(event);
     if (this.history.length > config.historySize) this.history.shift();
