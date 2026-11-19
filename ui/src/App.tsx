@@ -6,11 +6,13 @@
  * consumes GET /events. All writes go through the backend's own control
  * endpoints, none are exposed here.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { HyperspeedBackdrop } from "./components/HyperspeedBackdrop";
 import MagicBento from "./components/MagicBento";
 import { BentoCard, ProbBar } from "./components/BentoCard";
+import { TradeLog } from "./components/TradeLog";
 import { useHyperspeedDriver } from "./lib/useHyperspeedDriver";
+import { useLedger } from "./lib/useLedger";
 import { connectSSE } from "./lib/sse";
 import type { BlockEvent, Meta } from "./lib/types";
 
@@ -19,7 +21,6 @@ const WEAK_HARDWARE =
 
 export default function App() {
   const [latest, setLatest] = useState<BlockEvent | null>(null);
-  const [history, setHistory] = useState<BlockEvent[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(true);
@@ -27,12 +28,15 @@ export default function App() {
   const [pairOverride, setPairOverride] = useState<string | null>(() =>
     typeof window === "undefined" ? null : localStorage.getItem("kairos.pair"),
   );
+  const ledger = useLedger();
   // The bot's actual market is fixed by its MARKET env; the header select is the user's
   // display choice. The live pair is always in the list, the stored override wins.
   const pairOptions = Array.from(
     new Set(["cbBTC/USDC", "MON/USDC", "WMON/USDC", "ETH/USDC", meta?.pair ?? ""].filter(Boolean)),
   );
   const pair = pairOverride ?? meta?.pair ?? "…";
+
+  const { onSnapshot, onBlock, onQuote, onFill } = ledger;
 
   useEffect(() => {
     return connectSSE(
@@ -41,22 +45,24 @@ export default function App() {
         if (event.type === "snapshot") {
           setMeta(event.meta);
           if (event.latest) setLatest(event.latest);
-          setHistory(event.history);
           if (event.meta.running !== undefined) setRunning(event.meta.running);
+          onSnapshot(event.meta, event.history);
         } else if (event.type === "block") {
           setLatest(event.event);
-          setHistory((prev) => [...prev.slice(-99), event.event]);
+          onBlock(event.event);
         } else if (event.type === "quote") {
           setLatest((prev) => (prev ? { ...prev, quote: event.quote } : prev));
+          onQuote(event.block, event.quote);
         } else if (event.type === "fill") {
           setLatest((prev) => (prev ? { ...prev, fill: event.fill } : prev));
+          onFill(event.block, event.fill);
         } else if (event.type === "control") {
           setRunning(event.running);
         }
       },
       () => setConnected(false),
     );
-  }, []);
+  }, [onSnapshot, onBlock, onQuote, onFill]);
 
   // Escape exits focus mode.
   useEffect(() => {
@@ -151,11 +157,12 @@ export default function App() {
                 { content: <LatencyCard latest={latest} /> },
                 { content: <QuoteCard latest={latest} /> },
                 { content: <PositionCard latest={latest} /> },
-                { content: <FillsCard history={history} /> },
                 { content: <ModelHealthCard latest={latest} /> },
+                // The fills live in the trade log below — no duplicate card here.
                 { content: <PnlCard latest={latest} />, colSpan: 2 },
               ]}
             />
+            <TradeLog entries={ledger.entries} pair={pair} />
           </div>
         ) : (
           <div className="flex h-[50vh] items-center justify-center text-white/50">
@@ -253,29 +260,6 @@ function PositionCard({ latest }: { latest: BlockEvent }) {
           entry {p.entryPrice != null ? p.entryPrice.toFixed(6) : "—"}
         </div>
       </div>
-    </BentoCard>
-  );
-}
-
-function FillsCard({ history }: { history: BlockEvent[] }) {
-  const fills = history.filter((e) => e.fill).slice(-3).reverse();
-  return (
-    <BentoCard title="Recent Fills">
-      {fills.length ? (
-        <div className="flex flex-col gap-1.5 text-xs">
-          {fills.map((e) => (
-            <div key={`${e.block}-${e.fill!.orderId}`} className="flex items-center justify-between gap-2">
-              <span className={e.fill!.side === "buy" ? "text-emerald-400" : "text-rose-400"}>
-                {e.fill!.side.toUpperCase()} {e.fill!.size}
-              </span>
-              <span className="tabular-nums opacity-70">{e.fill!.price.toFixed(6)}</span>
-              <span className="opacity-50">#{e.fill!.orderId}</span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="text-sm opacity-50">no fills yet</div>
-      )}
     </BentoCard>
   );
 }

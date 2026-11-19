@@ -86,7 +86,7 @@ export function useHyperspeedDriver(latest: BlockEvent | null): HyperspeedProps 
   }, [latest, curve]);
 
   return useMemo(() => {
-    const late = latest?.decision.late ?? false;
+    const late = latest?.decision?.late ?? false;
     const failures = latest?.minaraFailures ?? 0;
     const healthy = failures === 0;
     const motion = REDUCED_MOTION ? 0.3 : 1;

@@ -1,3 +1,5 @@
 node_modules
 .env
 data/
+# vite build output for ui/
+dist

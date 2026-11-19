@@ -26,11 +26,19 @@ export interface HyperspeedProps {
   interactive: boolean;
 }
 
+/**
+ * The vendored Hyperspeed is a .jsx file with `checkJs: false`, so TS infers its props from
+ * the destructuring defaults — which leaves the props that have no default (roadColor,
+ * lineColor, onBoostStart, onBoostEnd, style) marked required. This app never sets them,
+ * so it is typed as an open prop bag instead of being edited (the file stays verbatim).
+ */
+const Scene = Hyperspeed as unknown as (props: Record<string, unknown>) => JSX.Element;
+
 export function HyperspeedBackdrop(props: HyperspeedProps) {
   const { interactive, ...rest } = props;
   return (
     <div className="fixed inset-0 z-0" style={{ pointerEvents: interactive ? "auto" : "none" }}>
-      <Hyperspeed {...rest} interactive={interactive} />
+      <Scene {...rest} interactive={interactive} />
     </div>
   );
 }

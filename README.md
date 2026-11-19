@@ -22,6 +22,8 @@ The dashboard lives in `ui/` and is a separate app with its own `package.json`:
     cd ui && npm install && npm run dev     # http://localhost:5173
 
 It proxies `/events` to the bot, so run the bot too. See [`ui/README.md`](./ui/README.md).
+If the market is quiet (or one-sided, as cbBTC-USDC is today), `bun run scripts/demo-feed.ts`
+serves a synthetic feed on `:3003` that speaks the same contract.
 
 ## Endpoints
 
@@ -88,3 +90,4 @@ dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it 
     bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
     bun run scripts/minara-test.ts    # MinaraModel acceptance: parse, timeout, HTTP error, cache rules
     bun run scripts/minara-loop-test.ts  # Trader + MinaraModel: hold posts no order, late is counted
+    bun run scripts/demo-feed.ts      # synthetic /events feed for the dashboard (no chain, no wallet)
